@@ -20,29 +20,22 @@ interface DataPointRepositoryJpa extends JpaRepository<DataPoint, Long> {
 
     @Query("""
         SELECT dp FROM DataPoint dp
-        WHERE dp.userId = :userId
-          AND dp.timestamp BETWEEN :from AND :to
-
+        WHERE dp.userId = :userId AND dp.timestamp BETWEEN :from AND :to
         UNION
-
         SELECT dp FROM DataPoint dp
-        WHERE dp.userId = :userId
-          AND dp.updateTimestamp BETWEEN :from AND :to
+        WHERE dp.userId = :userId AND dp.updateTimestamp BETWEEN :from AND :to
         """)
     List<DataPoint> findByUserIdAndTimestampBetween(
             @Param("userId") String userId,
             @Param("from") Instant from,
-            @Param("to") Instant to
-    );
+            @Param("to") Instant to);
 
     @Query("""
         SELECT dp FROM DataPoint dp
-        WHERE dp.userId = :userId
-          AND dp.updateTimestamp > :since
+        WHERE dp.userId = :userId AND dp.updateTimestamp > :since
         ORDER BY dp.updateTimestamp ASC, dp.id ASC
         """)
     List<DataPoint> findByUserIdAndUpdateTimestampAfter(
             @Param("userId") String userId,
-            @Param("since") Instant since
-    );
+            @Param("since") Instant since);
 }
