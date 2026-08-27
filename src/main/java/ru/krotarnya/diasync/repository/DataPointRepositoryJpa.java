@@ -19,9 +19,16 @@ interface DataPointRepositoryJpa extends JpaRepository<DataPoint, Long> {
     Optional<DataPoint> findByUserIdAndTimestamp(String userId, Instant timestamp);
 
     @Query("""
-            SELECT dp FROM DataPoint dp
-            WHERE dp.userId = :userId AND (dp.timestamp BETWEEN :from AND :to OR dp.updateTimestamp BETWEEN :from AND :to)
-            """)
+        SELECT dp FROM DataPoint dp
+        WHERE dp.userId = :userId
+          AND dp.timestamp BETWEEN :from AND :to
+
+        UNION
+
+        SELECT dp FROM DataPoint dp
+        WHERE dp.userId = :userId
+          AND dp.updateTimestamp BETWEEN :from AND :to
+        """)
     List<DataPoint> findByUserIdAndTimestampBetween(
             @Param("userId") String userId,
             @Param("from") Instant from,
