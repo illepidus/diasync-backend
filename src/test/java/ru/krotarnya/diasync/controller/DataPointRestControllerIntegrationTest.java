@@ -69,4 +69,15 @@ class DataPointRestControllerIntegrationTest {
         Assertions.assertThat(delResponse.getStatusCode().value()).isEqualTo(200);
         Assertions.assertThat(delResponse.getBody()).isEqualTo(1);
     }
+
+    @Test
+    void shouldReturnEmptyListWhenLongPollTimesOut() {
+        ResponseEntity<DataPoint[]> response = restTemplate.getForEntity(
+                BASE_URL + "/getDataPointsLongPoll?userId=rest-user&since=" + Instant.now()
+                        + "&sinceId=0&timeoutMs=10",
+                DataPoint[].class);
+
+        Assertions.assertThat(response.getStatusCode().value()).isEqualTo(200);
+        Assertions.assertThat(response.getBody()).isEmpty();
+    }
 }

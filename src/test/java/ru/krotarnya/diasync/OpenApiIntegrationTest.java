@@ -51,6 +51,17 @@ public class OpenApiIntegrationTest {
                 .contains("Swagger UI");
     }
 
+    @Test
+    void shouldProvideKiosk() {
+        ResponseEntity<String> response = query("/kiosk");
+
+        Assertions.assertThat(response.getStatusCode().value()).isEqualTo(200);
+        Assertions.assertThat(response.getBody())
+                .isNotNull()
+                .contains("<title>Diasync Kiosk</title>")
+                .contains("<canvas id=\"bg\"></canvas>");
+    }
+
     private ResponseEntity<String> query(String endpoint) {
         return restTemplate.exchange(
                 endpoint,

@@ -9,11 +9,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.FluxSink;
 import ru.krotarnya.diasync.model.DataPoint;
 import ru.krotarnya.diasync.repository.DataPointRepository;
 
@@ -23,7 +22,7 @@ public final class DataPointService {
 
     private final DataPointRepository dataPointRepository;
     private final UserLockService userLockService;
-    private final Map<String, List<FluxSink<DataPoint>>> subscribers = new ConcurrentHashMap<>();
+    private final Map<String, List<Consumer<DataPoint>>> subscribers = new ConcurrentHashMap<>();
 
     @Autowired
     public DataPointService(DataPointRepository dataPointRepository, UserLockService userLockService) {
@@ -61,7 +60,8 @@ public final class DataPointService {
 
         result.stream()
                 .filter(p -> updateTimestamp.equals(p.getUpdateTimestamp()))
-                .forEach(p -> subscribers.getOrDefault(p.getUserId(), List.of()).forEach(sink -> sink.next(p)));
+                .forEach(p -> subscribers.getOrDefault(p.getUserId(), List.of())
+                        .forEach(subscriber -> subscriber.accept(p)));
 
         return result;
     }
@@ -74,13 +74,18 @@ public final class DataPointService {
         return dataPointRepository.deleteByUserId(userId);
     }
 
-    public Flux<DataPoint> onDataPointAdded(String userId) {
-        return Flux.create(sink -> {
-            subscribers.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(sink);
-            sink.onDispose(() -> Optional.ofNullable(subscribers.get(userId))
-                    .filter(sinks -> sinks.remove(sink))
-                    .filter(List::isEmpty)
-                    .ifPresent(sinks -> subscribers.remove(userId)));
+    public Runnable subscribeToDataPointAdded(String userId, Consumer<DataPoint> subscriber) {
+        subscribers.compute(userId, (key, currentSubscribers) -> {
+            List<Consumer<DataPoint>> updatedSubscribers = currentSubscribers == null
+                    ? new CopyOnWriteArrayList<>()
+                    : currentSubscribers;
+            updatedSubscribers.add(subscriber);
+            return updatedSubscribers;
+        });
+
+        return () -> subscribers.computeIfPresent(userId, (key, currentSubscribers) -> {
+            currentSubscribers.remove(subscriber);
+            return currentSubscribers.isEmpty() ? null : currentSubscribers;
         });
     }
 
