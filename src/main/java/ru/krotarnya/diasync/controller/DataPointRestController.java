@@ -16,7 +16,7 @@ import ru.krotarnya.diasync.model.DataPoint;
 import ru.krotarnya.diasync.service.DataPointService;
 
 @RestController
-public final class DataPointRestController extends RestApiController implements DataPointController {
+public final class DataPointRestController extends RestApiController {
     private final DataPointService dataPointService;
 
     @Autowired
@@ -59,7 +59,6 @@ public final class DataPointRestController extends RestApiController implements 
                 || timestampComparison == 0 && dataPoint.getId() != null && dataPoint.getId() > sinceId;
     }
 
-    @Override
     @GetMapping("getDataPoints")
     public List<DataPoint> getDataPoints(
             @RequestParam("userId") String userId,
@@ -69,13 +68,11 @@ public final class DataPointRestController extends RestApiController implements 
         return dataPointService.getDataPoints(userId, from, to);
     }
 
-    @Override
     @PostMapping("addDataPoints")
     public List<DataPoint> addDataPoints(@RequestBody List<DataPoint> dataPoints) {
         return dataPointService.addDataPoints(dataPoints);
     }
 
-    @Override
     @DeleteMapping("truncateDataPoints")
     public int truncateDataPoints(@RequestParam("userId") String userId) {
         return dataPointService.truncateDataPoints(userId);

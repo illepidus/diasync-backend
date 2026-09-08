@@ -11,16 +11,3 @@ if [ "$DEPLOYED_VERSION" != "$APP_VERSION" ]; then
 else
   echo "Deployment verified: version $DEPLOYED_VERSION matches expected $APP_VERSION"
 fi
-
-echo "Checking WebSocket connectivity to wss://${DOMAIN}/graphql..."
-npm install -g wscat
-
-timeout 10s wscat -c "wss://${DOMAIN}/graphql" <<EOF
-EOF
-
-if [ $? -eq 0 ]; then
-  echo "WebSocket connection successful"
-else
-  echo "WebSocket connection failed"
-  exit 1
-fi

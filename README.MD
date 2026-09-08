@@ -48,9 +48,8 @@ flowchart LR
 
 ## Интеграция с API
 
-Поддерживается как GraphQL, так и REST API
+Поддерживается REST API.
 
-* [Graphiql](https://diasync.krotarnya.ru/graphiql)
 * [Swagger](https://diasync.krotarnya.ru/swagger)
 
 ## Kiosk интерфейс
