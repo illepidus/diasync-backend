@@ -3,6 +3,10 @@
 }
 
 {$DOMAIN} {
+    request_body {
+        max_size 2MB
+    }
+
     reverse_proxy app:15080 {
         transport http {
             response_header_timeout 80s

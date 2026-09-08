@@ -22,7 +22,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = "diasync.api.long-poll-max-results=2")
 @AutoConfigureMockMvc
 @Timeout(value = 5, unit = TimeUnit.SECONDS)
 class DataPointRestControllerTest {
@@ -66,6 +66,22 @@ class DataPointRestControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].id").value(second.getId()))
                 .andExpect(jsonPath("$[1]").doesNotExist());
+    }
+
+    @Test
+    void shouldLimitStoredLongPollUpdates() throws Exception {
+        List<DataPoint> stored = service.addDataPoints(List.of(
+                createDataPoint(Instant.parse("2025-01-01T00:00:00Z")),
+                createDataPoint(Instant.parse("2025-01-01T00:01:00Z")),
+                createDataPoint(Instant.parse("2025-01-01T00:02:00Z"))));
+
+        MvcResult pendingRequest = performLongPoll(Instant.EPOCH, 0, 1000);
+
+        mockMvc.perform(asyncDispatch(pendingRequest))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(stored.get(0).getId()))
+                .andExpect(jsonPath("$[1].id").value(stored.get(1).getId()))
+                .andExpect(jsonPath("$[2]").doesNotExist());
     }
 
     private MvcResult performLongPoll(Instant since, long sinceId, long timeoutMs) throws Exception {

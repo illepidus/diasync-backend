@@ -12,6 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import ru.krotarnya.diasync.model.DataPoint;
 import ru.krotarnya.diasync.repository.DataPointRepository;
@@ -22,16 +24,29 @@ public final class DataPointService {
 
     private final DataPointRepository dataPointRepository;
     private final UserLockService userLockService;
+    private final int readPageSize;
+    private final int longPollMaxResults;
     private final Map<String, List<Consumer<DataPoint>>> subscribers = new ConcurrentHashMap<>();
 
     @Autowired
-    public DataPointService(DataPointRepository dataPointRepository, UserLockService userLockService) {
+    public DataPointService(
+            DataPointRepository dataPointRepository,
+            UserLockService userLockService,
+            @Value("${diasync.api.read-page-size}") int readPageSize,
+            @Value("${diasync.api.long-poll-max-results}") int longPollMaxResults)
+    {
         this.dataPointRepository = dataPointRepository;
         this.userLockService = userLockService;
+        this.readPageSize = readPageSize;
+        this.longPollMaxResults = longPollMaxResults;
     }
 
     public List<DataPoint> getDataPointsUpdatedAfter(String userId, Instant after, long afterId) {
-        return dataPointRepository.findByUserIdAndUpdateCursorAfter(userId, after, afterId);
+        return dataPointRepository.findByUserIdAndUpdateCursorAfter(
+                userId,
+                after,
+                afterId,
+                PageRequest.of(0, longPollMaxResults));
     }
 
     public List<DataPoint> getDataPoints(String userId, @Nullable Instant fromO, @Nullable Instant toO) {
@@ -39,6 +54,32 @@ public final class DataPointService {
         Instant from = Optional.ofNullable(fromO).orElse(to.minus(DEFAULT_PERIOD));
 
         return dataPointRepository.findByUserIdAndTimestampBetween(userId, from, to);
+    }
+
+    public void forEachDataPoint(
+            String userId,
+            @Nullable Instant fromO,
+            @Nullable Instant toO,
+            Consumer<DataPoint> consumer)
+    {
+        Instant to = Optional.ofNullable(toO).orElse(Instant.now());
+        Instant from = Optional.ofNullable(fromO).orElse(to.minus(DEFAULT_PERIOD));
+        long afterId = Long.MIN_VALUE;
+
+        while (true) {
+            List<DataPoint> page = dataPointRepository.findPageByUserIdAndTimestampBetween(
+                    userId,
+                    from,
+                    to,
+                    afterId,
+                    PageRequest.of(0, readPageSize));
+            page.forEach(consumer);
+
+            if (page.size() < readPageSize) {
+                return;
+            }
+            afterId = page.getLast().getId();
+        }
     }
 
     public DataPoint addDataPoint(DataPoint dataPoint) {

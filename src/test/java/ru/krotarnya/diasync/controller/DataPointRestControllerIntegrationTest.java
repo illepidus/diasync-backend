@@ -14,7 +14,12 @@ import org.springframework.http.ResponseEntity;
 import ru.krotarnya.diasync.model.DataPoint;
 import ru.krotarnya.diasync.model.SensorGlucose;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = {
+                "diasync.api.read-page-size=2",
+                "diasync.api.max-write-batch-size=2"
+        })
 class DataPointRestControllerIntegrationTest {
     private static final String BASE_URL = "/api/v1";
 
@@ -79,5 +84,37 @@ class DataPointRestControllerIntegrationTest {
 
         Assertions.assertThat(response.getStatusCode().value()).isEqualTo(200);
         Assertions.assertThat(response.getBody()).isEmpty();
+    }
+
+    @Test
+    void shouldReturnOneJsonArrayWhenReadingMultipleInternalPages() {
+        for (int minute = 0; minute < 5; minute++) {
+            DataPoint point = createDataPoint().toBuilder()
+                    .timestamp(Instant.parse("2025-01-01T00:00:00Z").plusSeconds(60L * minute))
+                    .build();
+            restTemplate.postForEntity(BASE_URL + "/addDataPoints", List.of(point), DataPoint[].class);
+        }
+
+        ResponseEntity<DataPoint[]> response = restTemplate.getForEntity(
+                BASE_URL + "/getDataPoints?userId=rest-user&from=2025-01-01T00:00:00Z",
+                DataPoint[].class);
+
+        Assertions.assertThat(response.getStatusCode().value()).isEqualTo(200);
+        Assertions.assertThat(response.getBody()).hasSize(5);
+    }
+
+    @Test
+    void shouldRejectWriteBatchAboveConfiguredLimit() {
+        List<DataPoint> payload = List.of(
+                createDataPoint(),
+                createDataPoint().toBuilder().timestamp(Instant.parse("2025-01-01T00:01:00Z")).build(),
+                createDataPoint().toBuilder().timestamp(Instant.parse("2025-01-01T00:02:00Z")).build());
+
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                BASE_URL + "/addDataPoints",
+                payload,
+                String.class);
+
+        Assertions.assertThat(response.getStatusCode().value()).isEqualTo(413);
     }
 }
