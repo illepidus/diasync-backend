@@ -31,8 +31,8 @@ public final class DataPointService {
         this.userLockService = userLockService;
     }
 
-    public List<DataPoint> getDataPointsUpdatedAfter(String userId, Instant after) {
-        return dataPointRepository.findByUserIdAndUpdateTimestampAfter(userId, after);
+    public List<DataPoint> getDataPointsUpdatedAfter(String userId, Instant after, long afterId) {
+        return dataPointRepository.findByUserIdAndUpdateCursorAfter(userId, after, afterId);
     }
 
     public List<DataPoint> getDataPoints(String userId, @Nullable Instant fromO, @Nullable Instant toO) {

@@ -32,10 +32,12 @@ interface DataPointRepositoryJpa extends JpaRepository<DataPoint, Long> {
 
     @Query("""
         SELECT dp FROM DataPoint dp
-        WHERE dp.userId = :userId AND dp.updateTimestamp > :since
+        WHERE dp.userId = :userId
+          AND (dp.updateTimestamp > :since OR (dp.updateTimestamp = :since AND dp.id > :sinceId))
         ORDER BY dp.updateTimestamp ASC, dp.id ASC
         """)
-    List<DataPoint> findByUserIdAndUpdateTimestampAfter(
+    List<DataPoint> findByUserIdAndUpdateCursorAfter(
             @Param("userId") String userId,
-            @Param("since") Instant since);
+            @Param("since") Instant since,
+            @Param("sinceId") long sinceId);
 }

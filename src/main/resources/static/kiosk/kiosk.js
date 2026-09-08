@@ -6,6 +6,10 @@ const USE_CALIB = params.get('calibrations') !== 'false';
 const LOW = parseFloat(params.get('low')) || DEFAULTS.low;
 const HIGH = parseFloat(params.get('high')) || DEFAULTS.high;
 const STALE_MIN = parseFloat(params.get('stale')) || DEFAULTS.stale;
+const API_BASE = '/api/v1';
+const LONG_POLL_TIMEOUT_MS = 45000;
+const REQUEST_TIMEOUT_MS = LONG_POLL_TIMEOUT_MS + 10000;
+const MAX_RETRY_DELAY_MS = 30000;
 const PERIOD_MS = (() => {
     const m = /^(\d+)([smhd])$/.exec(params.get('period') || DEFAULTS.period);
     const mult = {s: 1e3, m: 6e4, h: 36e5, d: 864e5};
@@ -97,10 +101,14 @@ const ctx = document.getElementById('bg').getContext('2d');
 Chart.register(Chart.registry.getPlugin('annotation'), centerTextPlugin);
 Chart.register(offlineStatusPlugin);
 
-const sensorPoints = [];
-const manualPoints = [];
-let lastTimestamp = Date.now();
-let isWebSocketConnected = false;
+const sensorPoints = new Map();
+const manualPoints = new Map();
+let lastTimestamp = 0;
+let isConnected = null;
+let cursorTimestamp;
+let cursorId = 0;
+let activeRequest;
+let pollingGeneration = 0;
 
 function applyCalib(mgdl, cal) {
     return USE_CALIB && cal ? mgdl * cal.slope + cal.intercept : mgdl;
@@ -204,20 +212,24 @@ function initChart() {
     });
 }
 
-function updateDisplay(mgdl, cal) {
+function updateDisplay(timestamp, mgdl, cal) {
     const calibrated = applyCalib(mgdl, cal);
     chart.options.plugins.centerText.text = toDisplay(mgdl, cal);
     chart.options.plugins.centerText.color = getColor(calibrated);
-    lastTimestamp = Date.now();
+    lastTimestamp = new Date(timestamp).getTime();
 }
 
 function updateChart() {
     const now = Date.now();
+    const cutoff = now - PERIOD_MS;
     chart.options.scales.x.min = now - PERIOD_MS;
     chart.options.scales.x.max = now;
 
-    const recentSensor = sensorPoints.filter(p => new Date(p.x).getTime() >= now - PERIOD_MS);
-    const recentManual = manualPoints.filter(p => new Date(p.x).getTime() >= now - PERIOD_MS);
+    prunePoints(sensorPoints, cutoff);
+    prunePoints(manualPoints, cutoff);
+
+    const recentSensor = [...sensorPoints.values()].sort((a, b) => new Date(a.x) - new Date(b.x));
+    const recentManual = [...manualPoints.values()].sort((a, b) => new Date(a.x) - new Date(b.x));
 
     chart.data.datasets[0].data = recentSensor;
     chart.data.datasets[0].backgroundColor = recentSensor.map(p => p.backgroundColor);
@@ -230,7 +242,7 @@ function updateChart() {
         chart.options.scales.y.max = Math.max(...allY, HIGH) + delta;
     }
 
-    if ((now - lastTimestamp) / 60000 > STALE_MIN) {
+    if (!lastTimestamp || (now - lastTimestamp) / 60000 > STALE_MIN) {
         chart.options.plugins.centerText.text = '???';
         chart.options.plugins.centerText.color = COLORS.stale;
     }
@@ -242,9 +254,17 @@ function updateChart() {
     chart.update('none');
 }
 
+function prunePoints(points, cutoff) {
+    for (const [timestamp, point] of points) {
+        if (new Date(point.x).getTime() < cutoff) {
+            points.delete(timestamp);
+        }
+    }
+}
+
 function pushSensorPoint(ts, sg) {
     const calibrated = applyCalib(sg.mgdl, sg.calibration);
-    sensorPoints.push({
+    sensorPoints.set(ts, {
         x: ts,
         y: calibrated,
         mgdl: sg.mgdl,
@@ -255,122 +275,177 @@ function pushSensorPoint(ts, sg) {
 }
 
 function markDisconnected() {
-    if (!isWebSocketConnected) return;
-    isWebSocketConnected = false;
+    if (isConnected === false) return;
+    isConnected = false;
     chart.options.plugins.offlineStatus.enabled = true;
     chart.update('none');
 }
 
 function markConnected() {
-    if (isWebSocketConnected) return;
-    isWebSocketConnected = true;
+    if (isConnected === true) return;
+    isConnected = true;
     chart.options.plugins.offlineStatus.enabled = false;
     chart.update('none');
 }
 
-function loadInitial() {
-    const to = new Date().toISOString();
-    const from = new Date(Date.now() - PERIOD_MS).toISOString();
-    const query = `
-        query ($uid: String!, $from: String!, $to: String!) {
-          getDataPoints(userId: $uid, from: $from, to: $to) {
-            timestamp
-            sensorGlucose {
-              mgdl
-              sensorId
-              calibration {
-                slope
-                intercept
-              }
-            }
-            manualGlucose {
-              mgdl
-            }
-          }
-        }`;
+function applyDataPoints(points) {
+    for (const point of points) {
+        const timestampMs = new Date(point.timestamp).getTime();
+        if (!Number.isFinite(timestampMs)) {
+            throw new Error('The server returned a data point with an invalid timestamp');
+        }
 
-    fetch('/graphql', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({query, variables: {uid: USER_ID, from, to}})
-    })
-        .then(res => res.json())
-        .then(json => {
-            const pts = json.data.getDataPoints || [];
-            pts.forEach(pt => {
-                const ts = pt.timestamp;
-                const sg = pt.sensorGlucose;
-                const mg = pt.manualGlucose;
-
-                if (sg && sg.mgdl != null) {
-                    pushSensorPoint(ts, sg);
-                }
-                if (mg && mg.mgdl != null) {
-                    manualPoints.push({x: ts, y: mg.mgdl});
-                }
-            });
-
-            const last = pts.at(-1)?.sensorGlucose;
-            if (last?.mgdl != null) {
-                updateDisplay(last.mgdl, last.calibration);
+        const sensorGlucose = point.sensorGlucose;
+        const manualGlucose = point.manualGlucose;
+        if (sensorGlucose?.mgdl != null) {
+            pushSensorPoint(point.timestamp, sensorGlucose);
+            if (timestampMs >= lastTimestamp) {
+                updateDisplay(point.timestamp, sensorGlucose.mgdl, sensorGlucose.calibration);
             }
-        })
-        .catch(err => console.error('Failed to load data:', err));
+        }
+        if (manualGlucose?.mgdl != null) {
+            manualPoints.set(point.timestamp, {x: point.timestamp, y: manualGlucose.mgdl});
+        }
+    }
 }
 
-function startSubscription() {
-    const client = graphqlWs.createClient({
-        url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/graphql`,
-        retryAttempts: Infinity,
-        shouldRetry: () => true,
-        on: {
-            connected: () => {
-                markConnected();
-            },
-            closed: () => {
-                markDisconnected();
-            }
+function advanceCursor(points) {
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+        const point = points[index];
+        if (!point.updateTimestamp || !Number.isSafeInteger(point.id)) {
+            continue;
         }
+
+        if (!Number.isFinite(new Date(point.updateTimestamp).getTime())) {
+            throw new Error('The server returned a data point with an invalid update timestamp');
+        }
+
+        cursorTimestamp = point.updateTimestamp;
+        cursorId = point.id;
+        return;
+    }
+}
+
+async function fetchDataPoints(url, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    activeRequest = controller;
+
+    try {
+        const response = await fetch(url, {
+            cache: 'no-store',
+            headers: {'Accept': 'application/json'},
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            throw new Error(`Request failed with HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        if (!Array.isArray(result)) {
+            throw new Error('The server returned an invalid response');
+        }
+        return result;
+    } finally {
+        clearTimeout(timeout);
+        if (activeRequest === controller) {
+            activeRequest = undefined;
+        }
+    }
+}
+
+async function loadInitial() {
+    const to = new Date().toISOString();
+    cursorTimestamp = new Date(Date.now() - PERIOD_MS).toISOString();
+    const query = new URLSearchParams({userId: USER_ID, from: cursorTimestamp, to});
+    const points = await fetchDataPoints(`${API_BASE}/getDataPoints?${query}`, REQUEST_TIMEOUT_MS);
+    applyDataPoints(points);
+}
+
+function longPollUrl() {
+    const query = new URLSearchParams({
+        userId: USER_ID,
+        since: cursorTimestamp,
+        sinceId: cursorId.toString(),
+        timeoutMs: LONG_POLL_TIMEOUT_MS.toString()
     });
+    return `${API_BASE}/getDataPointsLongPoll?${query}`;
+}
 
-    const subscriptionQuery = `
-    subscription {
-      onDataPointAdded(userId: "${USER_ID}") {
-        timestamp
-        sensorGlucose {
-          mgdl
-          sensorId
-          calibration {
-            slope
-            intercept
-          }
-        }
-        manualGlucose {
-          mgdl
-        }
-      }
-    }`;
+function retryDelay(attempt) {
+    const exponentialDelay = Math.min(1000 * 2 ** Math.min(attempt, 5), MAX_RETRY_DELAY_MS);
+    return exponentialDelay * (0.75 + Math.random() * 0.5);
+}
 
-    client.subscribe({query: subscriptionQuery}, {
-        next({data}) {
-            const ts = data.onDataPointAdded.timestamp;
-            const sg = data.onDataPointAdded.sensorGlucose;
-            const mg = data.onDataPointAdded.manualGlucose;
-
-            if (sg && sg.mgdl != null) {
-                pushSensorPoint(ts, sg);
-                updateDisplay(sg.mgdl, sg.calibration);
-            }
-            if (mg && mg.mgdl != null) {
-                manualPoints.push({x: ts, y: mg.mgdl});
-            }
-        },
-        error: () => setTimeout(startSubscription, 3000),
-        complete: () => setTimeout(startSubscription, 3000)
+function waitForRetry(delay) {
+    return new Promise(resolve => {
+        const finish = () => {
+            clearTimeout(timeout);
+            window.removeEventListener('online', finish);
+            resolve();
+        };
+        const timeout = setTimeout(finish, delay);
+        window.addEventListener('online', finish, {once: true});
     });
+}
+
+async function pollForever(generation) {
+    let failures = 0;
+
+    while (generation === pollingGeneration) {
+        const startedAt = Date.now();
+        try {
+            const points = await fetchDataPoints(longPollUrl(), REQUEST_TIMEOUT_MS);
+            if (generation !== pollingGeneration) return;
+
+            applyDataPoints(points);
+            advanceCursor(points);
+            markConnected();
+            failures = 0;
+
+            if (points.length === 0 && Date.now() - startedAt < 1000) {
+                await waitForRetry(1000);
+            }
+        } catch (error) {
+            if (generation !== pollingGeneration) return;
+
+            markDisconnected();
+            if (failures === 0 || failures % 10 === 0) {
+                console.error('Long polling failed; retrying:', error);
+            }
+            await waitForRetry(retryDelay(failures));
+            failures += 1;
+        }
+    }
+}
+
+async function start() {
+    const generation = ++pollingGeneration;
+
+    try {
+        await loadInitial();
+        if (generation !== pollingGeneration) return;
+
+        markConnected();
+    } catch (error) {
+        if (generation !== pollingGeneration) return;
+
+        markDisconnected();
+        console.error('Failed to load initial data; continuing with long polling:', error);
+    }
+
+    await pollForever(generation);
 }
 
 initChart();
-loadInitial();
 setInterval(updateChart, 500);
-startSubscription();
+window.addEventListener('pagehide', () => {
+    pollingGeneration += 1;
+    activeRequest?.abort();
+});
+window.addEventListener('pageshow', event => {
+    if (event.persisted) {
+        start();
+    }
+});
+start();

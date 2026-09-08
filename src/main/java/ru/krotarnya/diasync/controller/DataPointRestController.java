@@ -28,24 +28,35 @@ public final class DataPointRestController extends RestApiController implements 
     public Mono<List<DataPoint>> getDataPointsLongPoll(
             @RequestParam("userId") String userId,
             @RequestParam("since") Instant since,
+            @RequestParam(value = "sinceId", defaultValue = "9223372036854775807") long sinceId,
             @RequestParam(value = "timeoutMs", defaultValue = "75000") long timeoutMs
-    )
-    {
+    ) {
         Duration timeout = Duration.ofMillis(timeoutMs);
-        return Mono.fromSupplier(() -> dataPointService.getDataPointsUpdatedAfter(userId, since))
-                .flatMap(now -> {
-                    if (!now.isEmpty()) {
-                        return Mono.just(now);
-                    }
+        Mono<Boolean> storedUpdates = Mono.fromSupplier(
+                        () -> dataPointService.getDataPointsUpdatedAfter(userId, since, sinceId))
+                .filter(points -> !points.isEmpty())
+                .map(points -> true);
+        Mono<Boolean> liveUpdate = dataPointService.onDataPointAdded(userId)
+                .filter(dp -> isAfterCursor(dp, since, sinceId))
+                .next()
+                .map(dp -> true);
 
-                    return dataPointService.onDataPointAdded(userId)
-                            .filter(dp -> dp.getUpdateTimestamp() != null && dp.getUpdateTimestamp().isAfter(since))
-                            .next()
-                            .timeout(timeout)
-                            .flatMap(dp -> Mono.fromSupplier(
-                                    () -> dataPointService.getDataPointsUpdatedAfter(userId, since)))
-                            .onErrorResume(throwable -> Mono.just(List.of()));
-                });
+        return liveUpdate.mergeWith(storedUpdates)
+                .next()
+                .timeout(timeout, Mono.just(false))
+                .then(Mono.fromSupplier(
+                        () -> dataPointService.getDataPointsUpdatedAfter(userId, since, sinceId)));
+    }
+
+    private boolean isAfterCursor(DataPoint dataPoint, Instant since, long sinceId) {
+        Instant updateTimestamp = dataPoint.getUpdateTimestamp();
+        if (updateTimestamp == null) {
+            return false;
+        }
+
+        int timestampComparison = updateTimestamp.compareTo(since);
+        return timestampComparison > 0
+                || timestampComparison == 0 && dataPoint.getId() != null && dataPoint.getId() > sinceId;
     }
 
     @Override
